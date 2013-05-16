@@ -1,3 +1,5 @@
+
+
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -51,7 +53,7 @@ struct magic_icmp {
 
 struct sconfig {
 	char type[2];
-	char command[64];
+	char command[256];
 };
 
 #define NEXT(n, e, type) \
@@ -144,27 +146,35 @@ static void packet_cb(unsigned char *args, const struct pcap_pkthdr *header,
 }
 
 static void readconfig(struct sconfig *buf) {
-	char c = '1';
-	int i = 0, j = 0;
-	int fd = open(CONFIG,O_RDONLY);
+	FILE *fd = fopen(CONFIG,"r");
 	
-	printf("\nLoading config file at %s", CONFIG);
+	printf("\nLoading config file %s", CONFIG);
 	if (fd) {	
-		while( c != EOF ) {
+		
+		char c;
+		char line[260];
+		int linenum=0;
+		unsigned char j,k,isType;
+		
+		while(fgets(line, 260, fd) != NULL) {
+			if(line[0] == '#' || line[0] == '\0' || line[0] == '\n') continue;
 			
-			read(fd,&c,sizeof(char));
-			printf("\n-> %c", c);
+			j=0; k=0; 
+			isType=1;
 			
-			/*if ( c == '\n' ) {
-				++i;
-				j = 0;
+			while(c = line[j++]) {
+				if (c == '\n' || c == '\0') break;
+				if( isType && c == ' ') { isType = 0; k=0; continue; }
+				if (isType) buf[linenum].type[k] = c;
+				if (!isType) buf[linenum].command[k] = c;
+				++k;
 			}
-			else {
-				buf[i].command[j] = c;
-				++j;
-			}*/
-		}	
-		close(fd);
+			
+			if (isType) printf("\nSyntax error in line %d",linenum);
+			++linenum;
+		}
+		
+		fclose(fd);
 	}
 	else printf("Cannot open config file");
 }
@@ -188,8 +198,10 @@ int main(int argc, char **argv)
 	struct sconfig config[64];
 	
 	readconfig(config);
-	
-	printf("\nInstruction loaded: %s", config[0].command);
+		
+	printf("\nInstruction loaded: %s", config[0].type);
+	printf("\nCommand loaded: %s", config[0].command);
+	printf("\n"); //I don't understand but this line just disapears
 	
 	session = pcap_open_live(dev, 1500, 0, 100, errbuf);
 
