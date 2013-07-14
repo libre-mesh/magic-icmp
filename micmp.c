@@ -23,9 +23,14 @@
 #include <fcntl.h>
 #include <pcap.h>
 #include <arpa/inet.h>
-#include <netinet/in.h>#define CONFIG "/etc/magicicmp.conf"
+#include <netinet/in.h>
+#include <string.h>
 
-static const char *filter = "icmp6";
+#define CONFIG "/etc/magicicmp.conf"
+#define MYFILTER "8888\0"
+
+// LibpCap Filter
+static const char *lc_filter = "icmp6";
 
 struct ether_qtag {
 	uint16_t pcp:3;
@@ -60,13 +65,13 @@ struct icmp_packet {
 };
 
 struct magic_icmp {
-	unsigned char filter[2];
-	unsigned char type[2];
-	unsigned char data[4];
+	unsigned char filter[5];
+	unsigned char type[5];
+	unsigned char data[9];
 };
 
 struct sconfig {
-	char type[2];
+	unsigned char type[5];
 	char command[256];
 };
 
@@ -135,59 +140,61 @@ static void packet_cb(unsigned char *args, const struct pcap_pkthdr *header,
 	int n,j;
 	struct magic_icmp m;
 	
-	j=0;
-	for (n = 8; n <= 10; n++) {
-		m.filter[j] = payload[n];
-		j++;
-		}
-	j=0;
-	for (n = 10; n <= 12; n++) {
-		m.type[j] = payload[n];
-		j++;
-		}
-	j=0;
-	for (n = 12; n <= 16; n++) {
-		m.data[j] = payload[n];
-		j++;
-		}
-		
-	printf("\n");
-	printf("%lu", header->ts.tv_sec);
-	printf(" Filter: %02x%02x", m.filter[0],m.filter[1]);
-	printf(" Type: %02x%02x", m.type[0],m.type[1]);
-	printf(" Data: %02x%02x%02x%02x", m.data[0],m.data[1],m.data[2],m.data[3]);
-	printf("\n");
+	// set 8,9 bytes for filter
+	sprintf(m.filter,"%02x%02x\0",payload[8],payload[9]);
+	
+	// only if the filter match the following data is processed
+	if(strncmp(MYFILTER,m.filter,4) <= 0) {
+		// set 10,11 bytes for type	
+		sprintf(m.type,"%02x%02x\0",payload[10],payload[11]);
+		// set 12,13,14,15 bytes for arbitrary data
+		sprintf(m.data,"%02x%02x%02x%02x\0",payload[12],payload[13],payload[14],payload[15]);
+		// some debug information
+		printf("\n");
+		printf(" Time: %lu", header->ts.tv_sec);
+		printf(" Filter: %s", m.filter);
+		printf(" Type: %s", m.type);
+		printf(" Data: %s", m.data);
+		printf("\n");
+	}
 }
 
 static void readconfig(struct sconfig *buf) {
 	FILE *fd = fopen(CONFIG,"r");
 	
-	printf("\nLoading config file %s", CONFIG);
+	printf("Loading config file %s\n", CONFIG);
 	if (fd) {	
-		
+		char type[2];
 		char c;
 		char line[260];
 		int linenum=0;
 		unsigned char j,k,isType;
 		
 		while(fgets(line, 260, fd) != NULL) {
-			if(line[0] == '#' || line[0] == '\0' || line[0] == '\n') continue;
+			if(sizeof(line) < 7 || line[0] == '#') continue;
 			
 			j=0; k=0; 
 			isType=1;
 			
 			while(c = line[j++]) {
 				if (c == '\n' || c == '\0') break;
-				if( isType && c == ' ') { isType = 0; k=0; continue; }
-				if (isType) buf[linenum].type[k] = c;
+				if (isType && c == ':') { 
+					printf("Recorded type: %s\n",buf[linenum].type); 
+					buf[linenum].type[k] = '\0';
+					isType = 0;
+					k=0;
+					continue; 
+				}
+				if (isType)  buf[linenum].type[k] = c;
 				if (!isType) buf[linenum].command[k] = c;
 				++k;
 			}
-			
-			if (isType) printf("\nSyntax error in line %d",linenum);
+			buf[linenum].command[k] = '\0';
+			if (isType) printf("\nSyntax error in line %d", linenum);
+			else printf("Recorded Command: %s\n",buf[linenum].command);
 			++linenum;
 		}
-		
+
 		fclose(fd);
 	}
 	else printf("Cannot open config file");
@@ -212,11 +219,12 @@ int main(int argc, char **argv)
 	struct sconfig config[64];
 	
 	readconfig(config);
+
+/*	FILE *db = fopen("/tmp/debug","w");
+	fprintf(db,"|%s|%s|", config[0].type, config[0].command);
+	fclose(db);
+*/
 		
-	printf("\nInstruction loaded: %s", config[0].type);
-	printf("\nCommand loaded: %s", config[0].command);
-	printf("\n"); //I don't understand but this line just disapears
-	
 	session = pcap_open_live(dev, 1500, 0, 100, errbuf);
 
 	if (!session)
@@ -225,15 +233,15 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
-	if (pcap_compile(session, &fp, filter, 0, 0) == -1)
+	if (pcap_compile(session, &fp, lc_filter, 0, 0) == -1)
 	{
-		fprintf(stderr, "Can't parse filter %s: %s\n", filter, pcap_geterr(session));
+		fprintf(stderr, "Can't parse filter %s: %s\n", lc_filter, pcap_geterr(session));
 		return 3;
 	}
 
 	if (pcap_setfilter(session, &fp) == -1)
 	{
-		fprintf(stderr, "Can't install filter %s: %s\n", filter, pcap_geterr(session));
+		fprintf(stderr, "Can't install filter %s: %s\n", lc_filter, pcap_geterr(session));
 		return 4;
 	}
 
