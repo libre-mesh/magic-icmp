@@ -27,7 +27,12 @@
 #include <string.h>
 
 #define CONFIG "/etc/magicicmp.conf"
-#define MYFILTER "8888\0"
+#define MYFILTER "8888"
+#define TYPESIZE 5
+#define FILTERSIZE 5
+#define DATASIZE 9
+#define CMDSIZE 256
+#define CFGSIZE 64
 
 // LibpCap Filter
 static const char *lc_filter = "icmp6";
@@ -65,15 +70,18 @@ struct icmp_packet {
 };
 
 struct magic_icmp {
-	unsigned char filter[5];
-	unsigned char type[5];
-	unsigned char data[9];
+	unsigned char filter[FILTERSIZE];
+	unsigned char type[TYPESIZE];
+	unsigned char data[DATASIZE];
 };
 
 struct sconfig {
-	unsigned char type[5];
-	char command[256];
+	unsigned char type[TYPESIZE];
+	char command[CMDSIZE];
 };
+
+//Global config struct
+struct sconfig config[CFGSIZE];
 
 #define NEXT(n, e, type) \
 	do { \
@@ -84,51 +92,74 @@ struct sconfig {
 		n += sizeof(type); \
 	} while(0)
 
-static const char * print_ether(struct ether_packet *e)
-{
+static const char * print_ether(struct ether_packet *e) {
 	printf("src %02x:%02x:%02x:%02x:%02x:%02x "
 	       "dst %02x:%02x:%02x:%02x:%02x:%02x ",
 	       e->src[0], e->src[1], e->src[2], e->src[3], e->src[4], e->src[5],
 	       e->dst[0], e->dst[1], e->dst[2], e->dst[3], e->dst[4], e->dst[5]);
 }
 
-static void print_ipv6(struct ipv6_packet *i)
-{
+static void print_ipv6(struct ipv6_packet *i) {
 	char buf[INET6_ADDRSTRLEN];
-
 	inet_ntop(AF_INET6, &i->src, buf, sizeof(buf));
 	printf("src %s ", buf);
-
 	inet_ntop(AF_INET6, &i->dst, buf, sizeof(buf));
 	printf("dst %s ", buf);
 }
 
+static int scommand(struct sconfig *cfg, char *type) {
+	int i;
+	for(i=0; cfg[i].type[0] != '\0'; ++i)
+		if( strncmp(cfg[i].type,type,TYPESIZE-1) == 0 )
+			return i;
+	return -1;
+}
+
+static void exec_cmd(int ic, char *d) {
+	int c;
+	char command[CMDSIZE+DATASIZE];
+	unsigned char dkey = 0;
+	
+	// Looking for special word $$ to substitute it by <data>
+	for (c=0; config[ic].command[c] != '\0'; ++c) {
+		if (config[ic].command[c] == '$') {
+			if (dkey == 0) dkey = 1;
+			else if (dkey == 1) {
+				strncpy(command,config[ic].command,c-1);
+				strcat(command,d);
+				if (config[ic].command[c+1] != '\0')
+					strcat(command,&config[ic].command[c+1]);
+				break;
+			}
+		}
+		else if (dkey == 1) dkey = 0;
+	}
+	printf(" Executing: %s\n",command);
+	system(command);
+}
+
 static void packet_cb(unsigned char *args, const struct pcap_pkthdr *header,
-		const unsigned char *packet)
-{
+		const unsigned char *packet) {
 	void *next = (void *)packet;
 	void *end = next + header->caplen;
+	int ic;
 	struct ether_packet *e;
 	struct ether_qtag *q;
 	struct icmp_packet *i;
 
 	//printf("Got pkt %lu.%lu %u/%u ",
-	 //      header->ts.tv_sec, header->ts.tv_usec, header->caplen, header->len);
+	//      header->ts.tv_sec, header->ts.tv_usec, header->caplen, header->len);
 
 	e = next;
 	NEXT(next, end, struct ether_packet);
-	//print_ether(e);
 
-	if (e->type == 0x8100)
-	{
+	if (e->type == 0x8100){
 		q = next;
 		NEXT(next, end, struct ether_qtag);
 		//printf("vlan %u/%u/%u ", q->pcp, q->dei, q->vid);
 	}
 
-	//print_ipv6(next);
 	NEXT(next, end, struct ipv6_packet);
-
 	i = next;
 	NEXT(next, end, struct icmp_packet);
 	//printf("icmp6 %u/%u ", i->type, i->code);
@@ -144,64 +175,75 @@ static void packet_cb(unsigned char *args, const struct pcap_pkthdr *header,
 	sprintf(m.filter,"%02x%02x\0",payload[8],payload[9]);
 	
 	// only if the filter match the following data is processed
-	if(strncmp(MYFILTER,m.filter,4) <= 0) {
+	if(strncmp(MYFILTER,m.filter,FILTERSIZE-1) == 0) {
 		// set 10,11 bytes for type	
 		sprintf(m.type,"%02x%02x\0",payload[10],payload[11]);
+		
 		// set 12,13,14,15 bytes for arbitrary data
 		sprintf(m.data,"%02x%02x%02x%02x\0",payload[12],payload[13],payload[14],payload[15]);
+		
 		// some debug information
-		printf("\n");
-		printf(" Time: %lu", header->ts.tv_sec);
-		printf(" Filter: %s", m.filter);
-		printf(" Type: %s", m.type);
-		printf(" Data: %s", m.data);
-		printf("\n");
+		printf("\n[%lu] Magic-ICMP received\n ", header->ts.tv_sec);
+		print_ether(e);
+		printf("\n Type: %s |", m.type);
+		printf(" Data: %s\n", m.data);
+		
+		ic = scommand(config,m.type);
+		if ( ic >= 0 ) {
+			printf(" Command found:");
+			printf(" %s\n",config[ic].command);
+			exec_cmd(ic,m.data);
+		}
+		else
+			printf(" Command not found for %s\n", m.type);
 	}
 }
 
 static void readconfig(struct sconfig *buf) {
 	FILE *fd = fopen(CONFIG,"r");
-	
+	int linenum=0;
 	printf("Loading config file %s\n", CONFIG);
 	if (fd) {	
-		char type[2];
+		char type[TYPESIZE];
 		char c;
-		char line[260];
-		int linenum=0;
+		char line[CMDSIZE+TYPESIZE+1];
+		int i;
 		unsigned char j,k,isType;
 		
-		while(fgets(line, 260, fd) != NULL) {
-			if(sizeof(line) < 7 || line[0] == '#') continue;
-			
+		while(fgets(line, CMDSIZE+TYPESIZE+1, fd) != NULL) {
+			if(line[0] == '#') continue;
 			j=0; k=0; 
 			isType=1;
-			
 			while(c = line[j++]) {
 				if (c == '\n' || c == '\0') break;
 				if (isType && c == ':') { 
-					printf("Recorded type: %s\n",buf[linenum].type); 
 					buf[linenum].type[k] = '\0';
 					isType = 0;
 					k=0;
 					continue; 
 				}
-				if (isType)  buf[linenum].type[k] = c;
+				if (isType)  type[k] = c;
 				if (!isType) buf[linenum].command[k] = c;
 				++k;
 			}
+			
 			buf[linenum].command[k] = '\0';
-			if (isType) printf("\nSyntax error in line %d", linenum);
-			else printf("Recorded Command: %s\n",buf[linenum].command);
-			++linenum;
+			type[TYPESIZE-1] = '\0';
+			
+			if (!isType) {
+				for(i=0; i<TYPESIZE; ++i) buf[linenum].type[i] = type[i];
+				printf("Recorded command %s -> %s\n",buf[linenum].type, buf[linenum].command);
+				++linenum;
+			}
 		}
-
 		fclose(fd);
 	}
-	else printf("Cannot open config file");
+	else printf("Cannot open config file\n");
+	
+	buf[linenum].type[0] = '\0';
 }
 	
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
 	const char *dev;
 	char errbuf[PCAP_ERRBUF_SIZE];
 	int rv;
@@ -209,47 +251,31 @@ int main(int argc, char **argv)
 	pcap_t *session;
 	struct bpf_program fp;
 
-	if (argc < 2)
-	{
+	if (argc < 2) {
 		fprintf(stderr, "Usage: %s <device>\n", argv[0]);
 		return 1;
 	}
 
 	dev = argv[1];
-	struct sconfig config[64];
-	
 	readconfig(config);
-
-/*	FILE *db = fopen("/tmp/debug","w");
-	fprintf(db,"|%s|%s|", config[0].type, config[0].command);
-	fclose(db);
-*/
-		
+	printf("Ready to receive magic-icmp packets!\n");
 	session = pcap_open_live(dev, 1500, 0, 100, errbuf);
 
-	if (!session)
-	{
+	if (!session) {
 		fprintf(stderr, "Can't open %s for capturing: %s\n", dev, errbuf);
 		return 2;
 	}
-
-	if (pcap_compile(session, &fp, lc_filter, 0, 0) == -1)
-	{
+	if (pcap_compile(session, &fp, lc_filter, 0, 0) == -1) {
 		fprintf(stderr, "Can't parse filter %s: %s\n", lc_filter, pcap_geterr(session));
 		return 3;
 	}
-
-	if (pcap_setfilter(session, &fp) == -1)
-	{
+	if (pcap_setfilter(session, &fp) == -1) {
 		fprintf(stderr, "Can't install filter %s: %s\n", lc_filter, pcap_geterr(session));
 		return 4;
 	}
 
 	rv = pcap_loop(session, -1, packet_cb, NULL);
-
-	if (rv)
-		fprintf(stderr, "Capture loop terminated with code %d\n", rv);
-
+	if (rv)	fprintf(stderr, "Capture loop terminated with code %d\n", rv);
 	pcap_close(session);
 
 	return rv;
