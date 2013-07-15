@@ -16,10 +16,10 @@ ping6 -p 0000111122222222 ff02::1%eth0 -s 24
 In the other side the daemon reads a config file /etc/magicicmp.conf which could look like:
 
 1526:/usr/bin/restart
-4431:/usr/bin/nc -vv -l -e /bin/bash -p {}
+4431:/usr/bin/nc -vv -l -e /bin/bash -p $$
 8897:echo "{}" >> /tmp/magicifmp.log
 
 The first number is the type, the user can define its own types. The second is the command. 
-The special word {} is substituted by the data field of the icmp6 payload.
+The special word $$ is substituted by the data field of the icmp6 payload.
 
 Happy hacking! :)
