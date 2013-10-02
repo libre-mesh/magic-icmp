@@ -7,7 +7,7 @@ help() {
 	exit 0
 }
 
-PING="ping6"
+PING="ping"
 FILTER="8888"
 SIZE=24
 IP="$1"
